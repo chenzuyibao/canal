@@ -27,8 +27,9 @@ import com.alibaba.otter.canal.common.zookeeper.ZookeeperPathUtils;
  * @version 1.0.0
  */
 public class ServerRunningMonitor extends AbstractCanalLifeCycle {
-
-    private static final Logger        logger       = LoggerFactory.getLogger(ServerRunningMonitor.class);
+    
+    private static final Logger        logger       = LoggerFactory
+        .getLogger(ServerRunningMonitor.class);
     private ZkClientx                  zkClient;
     private String                     destination;
     private IZkDataListener            dataListener;
@@ -41,31 +42,32 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
     private ScheduledExecutorService   delayExector = Executors.newScheduledThreadPool(1);
     private int                        delayTime    = 5;
     private ServerRunningListener      listener;
-
-    public ServerRunningMonitor(ServerRunningData serverData){
+    
+    public ServerRunningMonitor(ServerRunningData serverData) {
         this();
         this.serverData = serverData;
     }
-
-    public ServerRunningMonitor(){
+    
+    public ServerRunningMonitor() {
         // 创建父节点
         dataListener = new IZkDataListener() {
-
+            
             public void handleDataChange(String dataPath, Object data) throws Exception {
                 MDC.put("destination", destination);
-                ServerRunningData runningData = JsonUtils.unmarshalFromByte((byte[]) data, ServerRunningData.class);
+                ServerRunningData runningData = JsonUtils.unmarshalFromByte((byte[]) data,
+                    ServerRunningData.class);
                 if (!isMine(runningData.getAddress())) {
                     mutex.set(false);
                 }
-
+                
                 if (!runningData.isActive() && isMine(runningData.getAddress())) { // 说明出现了主动释放的操作，并且本机之前是active
                     release = true;
                     releaseRunning();// 彻底释放mainstem
                 }
-
+                
                 activeData = (ServerRunningData) runningData;
             }
-
+            
             public void handleDataDeleted(String dataPath) throws Exception {
                 MDC.put("destination", destination);
                 mutex.set(false);
@@ -75,31 +77,36 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
                 } else {
                     // 否则就是等待delayTime，避免因网络瞬端或者zk异常，导致出现频繁的切换操作
                     delayExector.schedule(new Runnable() {
-
+                        
                         public void run() {
                             initRunning();
                         }
                     }, delayTime, TimeUnit.SECONDS);
                 }
             }
-
+            
         };
-
+        
     }
-
+    
     public void init() {
         processStart();
     }
-
+    
     public synchronized void start() {
         super.start();
         try {
             processStart();
             if (zkClient != null) {
                 // 如果需要尽可能释放instance资源，不需要监听running节点，不然即使stop了这台机器，另一台机器立马会start
+                /*构建临时节点的路径：/otter/canal/destinations/{0}/running，其中占位符{0}会被destination替换。
+                在集群模式下，可能会有多个canal server共同处理同一个destination，
+                在某一时刻，只能由一个canal server进行处理，处理这个destination的canal server进入running状态，其他canal server进入standby状态。*/
                 String path = ZookeeperPathUtils.getDestinationServerRunning(destination);
+                /*对destination对应的running节点进行监听，一旦发生了变化，则说明可能其他处理相同destination的canal server可能出现了异常，
+                此时需要尝试自己进入running状态。*/
                 zkClient.subscribeDataChanges(path, dataListener);
-
+                
                 initRunning();
             } else {
                 processActiveEnter();// 没有zk，直接启动
@@ -109,9 +116,9 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
             // 没有正常启动，重置一下状态，避免干扰下一次start
             stop();
         }
-
+        
     }
-
+    
     public void release() {
         if (zkClient != null) {
             releaseRunning(); // 尝试一下release
@@ -119,31 +126,34 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
             processActiveExit(); // 没有zk，直接启动
         }
     }
-
+    
     public synchronized void stop() {
         super.stop();
-
+        
         if (zkClient != null) {
             String path = ZookeeperPathUtils.getDestinationServerRunning(destination);
             zkClient.unsubscribeDataChanges(path, dataListener);
-
+            
             releaseRunning(); // 尝试一下release
         } else {
             processActiveExit(); // 没有zk，直接启动
         }
         processStop();
     }
-
+    
     private void initRunning() {
         if (!isStart()) {
             return;
         }
-
+        //构建临时节点的路径：/otter/canal/destinations/{0}/running，其中占位符{0}会被destination替换
         String path = ZookeeperPathUtils.getDestinationServerRunning(destination);
         // 序列化
+        //构建临时节点的数据，标记当前destination由哪一个canal server处理
         byte[] bytes = JsonUtils.marshalToByte(serverData);
         try {
             mutex.set(false);
+            //尝试创建临时节点。如果节点已经存在，说明是其他的canal server已经启动了这个canal instance。
+            //此时会抛出ZkNodeExistsException，进入catch代码块。
             zkClient.create(path, bytes, CreateMode.EPHEMERAL);
             activeData = serverData;
             processActiveEnter();// 触发一下事件
@@ -160,7 +170,7 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
             initRunning();
         }
     }
-
+    
     /**
      * 阻塞等待自己成为active，如果自己成为active，立马返回
      * 
@@ -170,7 +180,7 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
         initRunning();
         mutex.get();
     }
-
+    
     /**
      * 检查当前的状态
      */
@@ -178,14 +188,14 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
         String path = ZookeeperPathUtils.getDestinationServerRunning(destination);
         try {
             byte[] bytes = zkClient.readData(path);
-            ServerRunningData eventData = JsonUtils.unmarshalFromByte(bytes, ServerRunningData.class);
+            ServerRunningData eventData = JsonUtils.unmarshalFromByte(bytes,
+                ServerRunningData.class);
             activeData = eventData;// 更新下为最新值
             // 检查下nid是否为自己
             boolean result = isMine(activeData.getAddress());
             if (!result) {
                 logger.warn("canal is running in node[{}] , but not in node[{}]",
-                    activeData.getCid(),
-                    serverData.getCid());
+                    activeData.getCid(), serverData.getCid());
             }
             return result;
         } catch (ZkNoNodeException e) {
@@ -200,7 +210,7 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
             return false;
         }
     }
-
+    
     private boolean releaseRunning() {
         if (check()) {
             String path = ZookeeperPathUtils.getDestinationServerRunning(destination);
@@ -209,16 +219,16 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
             processActiveExit();
             return true;
         }
-
+        
         return false;
     }
-
+    
     // ====================== helper method ======================
-
+    
     private boolean isMine(String address) {
         return address.equals(serverData.getAddress());
     }
-
+    
     private void processStart() {
         if (listener != null) {
             try {
@@ -228,7 +238,7 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
             }
         }
     }
-
+    
     private void processStop() {
         if (listener != null) {
             try {
@@ -238,13 +248,13 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
             }
         }
     }
-
+    
     private void processActiveEnter() {
         if (listener != null) {
             listener.processActiveEnter();
         }
     }
-
+    
     private void processActiveExit() {
         if (listener != null) {
             try {
@@ -254,27 +264,27 @@ public class ServerRunningMonitor extends AbstractCanalLifeCycle {
             }
         }
     }
-
+    
     public void setListener(ServerRunningListener listener) {
         this.listener = listener;
     }
-
+    
     // ===================== setter / getter =======================
-
+    
     public void setDelayTime(int delayTime) {
         this.delayTime = delayTime;
     }
-
+    
     public void setServerData(ServerRunningData serverData) {
         this.serverData = serverData;
     }
-
+    
     public void setDestination(String destination) {
         this.destination = destination;
     }
-
+    
     public void setZkClient(ZkClientx zkClient) {
         this.zkClient = zkClient;
     }
-
+    
 }
