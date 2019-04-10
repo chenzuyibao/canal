@@ -28,40 +28,43 @@ import com.alibaba.otter.canal.server.netty.handler.SessionHandler;
  * @version 1.0.0
  */
 public class CanalServerWithNetty extends AbstractCanalLifeCycle implements CanalServer {
-
-    private CanalServerWithEmbedded embeddedServer;      // 嵌入式server
+    
+    private CanalServerWithEmbedded embeddedServer;       // 嵌入式server
     private String                  ip;
     private int                     port;
     private Channel                 serverChannel = null;
     private ServerBootstrap         bootstrap     = null;
     private ChannelGroup            childGroups   = null; // socket channel
-                                                          // container, used to
-                                                          // close sockets
-                                                          // explicitly.
-
+    // container, used to
+    // close sockets
+    // explicitly.
+    
     private static class SingletonHolder {
-
+        
         private static final CanalServerWithNetty CANAL_SERVER_WITH_NETTY = new CanalServerWithNetty();
     }
-
-    private CanalServerWithNetty(){
+    
+    private CanalServerWithNetty() {
         this.embeddedServer = CanalServerWithEmbedded.instance();
         this.childGroups = new DefaultChannelGroup();
     }
-
+    
     public static CanalServerWithNetty instance() {
         return SingletonHolder.CANAL_SERVER_WITH_NETTY;
     }
-
+    
     public void start() {
         super.start();
-
+        //优先启动内嵌的canal server，因为基于netty的实现需要将请求委派给其处理
         if (!embeddedServer.isStart()) {
             embeddedServer.start();
         }
-
-        this.bootstrap = new ServerBootstrap(new NioServerSocketChannelFactory(Executors.newCachedThreadPool(),
-            Executors.newCachedThreadPool()));
+        /* 创建bootstrap实例，参数NioServerSocketChannelFactory也是Netty的API，其接受2个线程池参数
+        其中第一个线程池是Accept线程池，第二个线程池是woker线程池，
+        Accept线程池接收到client连接请求后，会将代表client的对象转发给worker线程池处理。
+        这里属于netty的知识，不熟悉的用户暂时不必深究，简单认为netty使用线程来处理客户端的高并发请求即可。*/
+        this.bootstrap = new ServerBootstrap(new NioServerSocketChannelFactory(
+            Executors.newCachedThreadPool(), Executors.newCachedThreadPool()));
         /*
          * enable keep-alive mechanism, handle abnormal network connection
          * scenarios on OS level. the threshold parameters are depended on OS.
@@ -73,65 +76,66 @@ public class CanalServerWithNetty extends AbstractCanalLifeCycle implements Cana
          * optional parameter.
          */
         bootstrap.setOption("child.tcpNoDelay", true);
-
+        
         // 构造对应的pipeline
         bootstrap.setPipelineFactory(new ChannelPipelineFactory() {
-
+            
             public ChannelPipeline getPipeline() throws Exception {
                 ChannelPipeline pipelines = Channels.pipeline();
-                pipelines.addLast(FixedHeaderFrameDecoder.class.getName(), new FixedHeaderFrameDecoder());
+                pipelines.addLast(FixedHeaderFrameDecoder.class.getName(),
+                    new FixedHeaderFrameDecoder());
                 // support to maintain child socket channel.
                 pipelines.addLast(HandshakeInitializationHandler.class.getName(),
                     new HandshakeInitializationHandler(childGroups));
                 pipelines.addLast(ClientAuthenticationHandler.class.getName(),
                     new ClientAuthenticationHandler(embeddedServer));
-
+                
                 SessionHandler sessionHandler = new SessionHandler(embeddedServer);
                 pipelines.addLast(SessionHandler.class.getName(), sessionHandler);
                 return pipelines;
             }
         });
-
-        // 启动
+        
+        // 启动，当bind方法被调用时，netty开始真正的监控某个端口，此时客户端对这个端口的请求可以被接受到
         if (StringUtils.isNotEmpty(ip)) {
             this.serverChannel = bootstrap.bind(new InetSocketAddress(this.ip, this.port));
         } else {
             this.serverChannel = bootstrap.bind(new InetSocketAddress(this.port));
         }
     }
-
+    
     public void stop() {
         super.stop();
-
+        
         if (this.serverChannel != null) {
             this.serverChannel.close().awaitUninterruptibly(1000);
         }
-
+        
         // close sockets explicitly to reduce socket channel hung in complicated
         // network environment.
         if (this.childGroups != null) {
             this.childGroups.close().awaitUninterruptibly(5000);
         }
-
+        
         if (this.bootstrap != null) {
             this.bootstrap.releaseExternalResources();
         }
-
+        
         if (embeddedServer.isStart()) {
             embeddedServer.stop();
         }
     }
-
+    
     public void setIp(String ip) {
         this.ip = ip;
     }
-
+    
     public void setPort(int port) {
         this.port = port;
     }
-
+    
     public void setEmbeddedServer(CanalServerWithEmbedded embeddedServer) {
         this.embeddedServer = embeddedServer;
     }
-
+    
 }
